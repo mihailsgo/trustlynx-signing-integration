@@ -53,22 +53,48 @@ Define environment-specific base URLs:
 - `ARCHIVE_BASE_URL`: `https://<internal-domain>`
 - `INTERNAL_GATEWAY_BASE_URL`: `https://<internal-domain>`
 
-## API 1. Get OIDC Access Token
-### Endpoint
-`POST {KEYCLOAK_BASE_URL}/protocol/openid-connect/token`
+## API 1. Keycloak Authorization (Detailed)
+All protected SignBox APIs require bearer token from Keycloak.
 
-### Recommended grant type
-`client_credentials`
+Token endpoint:
 
-### Request
-Content-Type: `application/x-www-form-urlencoded`
+- `POST {KEYCLOAK_BASE_URL}/protocol/openid-connect/token`
+- `Content-Type: application/x-www-form-urlencoded`
 
-Required form fields:
+OIDC discovery endpoint (recommended to read at startup/config validation):
+
+- `GET {KEYCLOAK_BASE_URL}/.well-known/openid-configuration`
+
+### 1.1 Choose the correct grant type
+Use one of the following:
+
+1. `client_credentials`  
+For backend-to-backend integration (recommended default).
+
+2. `password`  
+For API login as real Keycloak user (only if business flow explicitly requires user token).
+
+Do not use browser frontend to request confidential tokens.
+
+### 1.2 Keycloak client configuration requirements
+Minimum required configuration in Keycloak client:
+
+- Client type: `confidential` (recommended)
+- `Service Accounts Enabled = ON` for `client_credentials`
+- `Direct Access Grants Enabled = ON` for `password`
+- Valid realm roles/client roles mapped for API access
+- Token lifespan configured according to security policy
+
+If these flags are missing, token requests fail even with correct credentials.
+
+### 1.3 Service token flow (`client_credentials`)
+Request fields:
+
 - `grant_type=client_credentials`
 - `client_id=<integration-client-id>`
 - `client_secret=<integration-client-secret>`
 
-### cURL
+Example:
 ```bash
 curl -X POST "${KEYCLOAK_BASE_URL}/protocol/openid-connect/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
@@ -77,16 +103,77 @@ curl -X POST "${KEYCLOAK_BASE_URL}/protocol/openid-connect/token" \
   -d "client_secret=${CLIENT_SECRET}"
 ```
 
-### Typical response
+Use this token for:
+
+- `POST /api/document/create`
+- `POST /api/auth/session/redirecturl`
+- `GET /api/document/{id}/download`
+
+### 1.4 User token flow (`password`)
+Use when integration needs to authenticate a specific Keycloak user account via API.
+
+Request fields:
+
+- `grant_type=password`
+- `client_id=<client-id>`
+- `client_secret=<client-secret>` (for confidential clients)
+- `username=<keycloak-username>`
+- `password=<keycloak-password>`
+- optional: `scope=openid`
+
+Example:
+```bash
+curl -X POST "${KEYCLOAK_BASE_URL}/protocol/openid-connect/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=password" \
+  -d "client_id=${CLIENT_ID}" \
+  -d "client_secret=${CLIENT_SECRET}" \
+  -d "username=${KC_USERNAME}" \
+  -d "password=${KC_PASSWORD}" \
+  -d "scope=openid"
+```
+
+Common failure reasons for `password` flow:
+
+- `invalid_grant`: wrong password, disabled user, locked user, required actions not completed
+- `unauthorized_client`: direct access grants disabled for client
+- `invalid_client`: wrong client id/secret
+
+### 1.5 Token response fields and usage
+Typical response:
 ```json
 {
   "access_token": "eyJ...",
   "expires_in": 300,
   "refresh_expires_in": 0,
+  "refresh_token": "eyJ...",
   "token_type": "Bearer",
   "scope": "openid profile"
 }
 ```
+
+How to use:
+
+- Send header: `Authorization: Bearer <access_token>`
+- Renew token before `expires_in` is reached
+- Do not log raw token in application logs
+
+### 1.6 Quick token validation checks
+Before calling SignBox APIs, validate:
+
+1. Token is present and non-empty.
+2. JWT `exp` is in the future.
+3. Token contains expected realm/client roles.
+4. Audience and issuer match realm configuration.
+
+### 1.7 Troubleshooting checklist
+If protected API returns `401`/`403`:
+
+1. Confirm token endpoint is correct realm.
+2. Confirm client flags (`Service Accounts` or `Direct Access Grants`).
+3. Decode JWT and verify `exp`, `iss`, `aud`, `realm_access.roles`.
+4. Check server clock drift (NTP).
+5. Re-request token and retry once.
 
 ## API 2. Create Document in Archive
 ### Endpoint
@@ -126,9 +213,7 @@ Example JSON before URL encoding:
 
 ### cURL
 ```bash
-DOC_META='{"documentFilename":"contract-2026-001.pdf","objectName":"contract-2026-001","documentType":"Contract","contentType":"application/pdf","documentData":{"customerId":"CUST-001","caseId":"CASE-8891"}}'
-
-curl -X POST "${ARCHIVE_BASE_URL}/api/document/create?documentData=$(python -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))' "$DOC_META")" \
+curl -X POST "${ARCHIVE_BASE_URL}/api/document/create?documentData=%7B%22documentFilename%22%3A%22contract-2026-001.pdf%22%2C%22objectName%22%3A%22contract-2026-001%22%2C%22documentType%22%3A%22Contract%22%2C%22contentType%22%3A%22application%2Fpdf%22%2C%22documentData%22%3A%7B%22customerId%22%3A%22CUST-001%22%2C%22caseId%22%3A%22CASE-8891%22%7D%7D" \
   -H "Authorization: Bearer ${ACCESS_TOKEN}" \
   -F "file=@./contract-2026-001.pdf"
 ```
